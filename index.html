@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>寻宝游戏</title>
+  <link rel="stylesheet" href="treasure.css">
+</head>
+<body>
+
+  <div class="layout">
+    <div class="left-panel">
+      <div class="log-title">📜 冒险日志</div>
+      <div class="log" id="log"></div>
+    </div>
+
+    <div class="right-panel">
+      <div class="hud">
+        <div class="hud-item">
+          <span class="hud-label">进度</span>
+          <div class="bar-bg"><div class="bar-fill" id="bar"></div></div>
+          <span class="hud-percent" id="percent">0%</span>
+        </div>
+        <div class="hud-item" id="objective">🎯 目标：去 <b>📚 图书馆</b> 找线索</div>
+      </div>
+
+      <div class="world scene-outdoor" id="world">
+        <div class="scene-title" id="sceneTitle">🌍 户外地图</div>
+        <button class="exit-scene-btn" id="exitSceneBtn">← 返回户外</button>
+        <div class="map-banner" id="mapBanner"></div>
+
+        <div id="mazeLayer"></div>
+        <div id="portalsLayer"></div>
+        <div id="pickupsLayer"></div>
+        <div id="guardsLayer"></div>
+
+        <div class="player" id="player">
+          <div class="player-sprite" id="playerSprite"></div>
+          <div class="player-tag">你</div>
+        </div>
+
+        <div class="hint-bubble" id="hintBubble">按 <kbd>空格</kbd></div>
+        <div class="particles" id="particles"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="scene-fade" id="sceneFade"></div>
+
+  <div class="pickup-popup" id="pickupPopup">
+    <span class="pp-icon" id="ppIcon">📜</span>
+    <div class="pp-text" id="ppText"></div>
+    <button id="ppClose">继 续</button>
+  </div>
+
+  <div class="modal-overlay" id="victoryModal">
+    <div class="modal">
+      <h2>🏆 恭喜寻宝成功！</h2>
+      <p>你找到了传说中的宝藏，<br>成为了真正的寻宝大师！</p>
+      <div class="modal-buttons">
+        <button class="btn-map" id="btnContinueMap">🗺️ 返回地图继续探险</button>
+        <button class="btn-again" id="btnAgain">🔄 重新开始</button>
+        <button class="btn-exit" id="btnExit">🚪 退出游戏</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="victoryFxLayer" class="hidden"></div>
+
+  <div class="controls-tip">
+    <span><kbd>WASD</kbd> / <kbd>方向键</kbd> 移动</span>
+    <span><kbd>空格</kbd> 交互 / 拾取</span>
+    <span><kbd>Esc</kbd> 返回户外</span>
+    <span><kbd>R</kbd> 重开</span>
+  </div>
+
+  <script src="treasure.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    let WORLD_W = 900, WORLD_H = 520;
+    const PLAYER_SIZE = 64;
+    const SPEED = 3.4;
+    const WALK_FRAMES = 8;
+    const FRAME_INTERVAL = 5;
+
+    const world        = document.getElementById('world');
+    const playerEl     = document.getElementById('player');
+    const playerSprite = document.getElementById('playerSprite');
+    const hintBubble   = document.getElementById('hintBubble');
+    const barEl        = document.getElementById('bar');
+    const percentEl    = document.getElementById('percent');
+    const objectiveEl  = document.getElementById('objective');
+    const logEl        = document.getElementById('log');
+    const particlesEl  = document.getElementById('particles');
+    const portalsLayer = document.getElementById('portalsLayer');
+    const pickupsLayer = document.getElementById('pickupsLayer');
+    const guardsLayer  = document.getElementById('guardsLayer');
+    const mazeLayer    = document.getElementById('mazeLayer');
+    const sceneTitle   = document.getElementById('sceneTitle');
+    const sceneFade    = document.getElementById('sceneFade');
+    const mapBanner    = document.getElementById('mapBanner');
+    const victoryFxLayer = document.getElementById('victoryFxLayer');
+    const pickupPopup  = document.getElementById('pickupPopup');
+    const ppIcon       = document.getElementById('ppIcon');
+    const ppText       = document.getElementById('ppText');
+    const ppClose      = document.getElementById('ppClose');
+    const victoryModal = document.getElementById('victoryModal');
+    const btnAgain     = document.getElementById('btnAgain');
+    const btnExit      = document.getElementById('btnExit');
+    const btnContinueMap = document.getElementById('btnContinueMap');
+    const exitSceneBtn = document.getElementById('exitSceneBtn');
+
+    function syncWorldSize() {
+      const rect = world.getBoundingClientRect();
+      WORLD_W = rect.width;
+      WORLD_H = rect.height;
+    }
+    window.addEventListener('resize', syncWorldSize);
+
+    const walkFrames = [];
+    for (let i = 1; i <= WALK_FRAMES; i++) {
+      const img = new Image();
+      img.src = `photo/walk${i}.png`;
+      walkFrames.push(img);
+    }
+
+    const PORTALS = [
+      { id: 'library', icon: '📚', name: '图书馆', sx: 0.16, sy: 0.28, scene: 'library', kind: 'clue', maze: true },
+      { id: 'stone',   icon: '🧩', name: '石碑',   sx: 0.50, sy: 0.24, scene: 'stone',   kind: 'decode', maze: true },
+      { id: 'temple',  icon: '🏛️', name: '神庙',   sx: 0.78, sy: 0.62, scene: 'temple',  kind: 'temple' },
+      { id: 'church',  icon: '⛪', name: '教堂',   sx: 0.50, sy: 0.72, scene: 'church',  kind: 'bonus' },
+      { id: 'cave',    icon: '🕳️', name: '洞穴',   sx: 0.22, sy: 0.72, scene: 'cave',    kind: 'bonus' },
+      { id: 'basement',icon: '📦', name: '地下室', sx: 0.78, sy: 0.26, scene: 'basement',kind: 'bonus' }
+    ];
+    const EXPLORE_SPOTS = ['temple', 'church', 'cave', 'basement'];
+
+    const state = {
+      px: 0, py: 0, facing: 'down', frame: 0, frameTimer: 0,
+      keys: {}, busy: false, finished: false, progress: 0, done: {},
+      scene: 'outdoor',
+      activePortals: [], activePickups: [], activeGuards: [], activeWalls: [],
+      switching: false,
+      treasureSpot: 'temple', guardSpots: [],
+      hasClue: false, hasLocation: false, hasTreasureBox: false,
+      onPopupClose: null, treasureHinted: false,
+      warningActive: false,
+      trophyShown: false // ⭐ 记录本局是否已闪过奖杯
+    };
+
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    function log(html, cls = '') {
+      const line = document.createElement('div');
+      line.className = 'line ' + cls; line.innerHTML = html;
+      logEl.appendChild(line); logEl.scrollTop = logEl.scrollHeight;
+      while (logEl.children.length > 50) logEl.removeChild(logEl.firstChild);
+    }
+    function clearLog() { logEl.innerHTML = ''; }
+    function showBanner(html, duration = 3000) {
+      mapBanner.innerHTML = html; mapBanner.classList.add('show');
+      clearTimeout(mapBanner._t);
+      mapBanner._t = setTimeout(() => mapBanner.classList.remove('show'), duration);
+    }
+    function burst(x, y, count = 18) {
+      const icons = ['⭐','✨','💫','🌟'];
+      for (let i = 0; i < count; i++) {
+        const p = document.createElement('div'); p.className = 'particle';
+        p.textContent = icons[Math.floor(Math.random() * icons.length)];
+        const ang = Math.random() * Math.PI * 2, dist = 40 + Math.random() * 80;
+        p.style.left = x + 'px'; p.style.top = y + 'px';
+        p.style.setProperty('--x', Math.cos(ang) * dist + 'px');
+        p.style.setProperty('--y', Math.sin(ang) * dist + 'px');
+        particlesEl.appendChild(p); setTimeout(() => p.remove(), 1100);
+      }
+    }
+    function updateProgressBar() {
+      const total = 5;
+      const pct = Math.min(100, Math.round((state.progress / total) * 100));
+      barEl.style.width = pct + '%'; percentEl.textContent = pct + '%';
+    }
+    function setObjective(html) { objectiveEl.innerHTML = '🎯 目标：' + html; }
+
+    function showWarning(text) {
+      if (state.warningActive) return;
+      state.warningActive = true;
+      const el = document.createElement('div');
+      el.className = 'center-warning show';
+      el.innerHTML = `<span>❗</span> ${text}`;
+      document.body.appendChild(el);
+      setTimeout(() => {
+        el.classList.remove('show');
+        setTimeout(() => el.remove(), 300);
+        state.warningActive = false;
+      }, 2500);
+    }
+
+    function animateWalk(isMoving) {
+      if (isMoving) {
+        state.frameTimer++;
+        if (state.frameTimer >= FRAME_INTERVAL) {
+          state.frameTimer = 0; state.frame = (state.frame + 1) % WALK_FRAMES;
+        }
+      } else { state.frame = 0; state.frameTimer = 0; }
+      const img = walkFrames[state.frame];
+      if (img && img.complete && img.naturalWidth > 0) {
+        playerSprite.style.backgroundImage = `url(${img.src})`;
+      }
+      const flip = state.facing === 'left' ? 'scaleX(-1)' : 'scaleX(1)';
+      playerSprite.style.transform = flip;
+    }
+
+    function renderOutdoorPortals() {
+      portalsLayer.innerHTML = '';
+      state.activePortals = [];
+      PORTALS.forEach(p => {
+        const x = p.sx * WORLD_W, y = p.sy * WORLD_H;
+        const el = document.createElement('div');
+        el.className = 'portal'; el.id = 'portal-' + p.id;
+        el.style.left = (x - 40) + 'px'; el.style.top = (y - 40) + 'px';
+        el.innerHTML = `<div class="portal-icon">${p.icon}</div><div class="portal-label">${p.name}</div>`;
+        if (state.done[p.id]) el.classList.add('done');
+        if (!isPortalUnlocked(p.id)) el.classList.add('locked');
+        portalsLayer.appendChild(el);
+        state.activePortals.push({ ...p, x, y, el });
+      });
+    }
+    function isPortalUnlocked(id) {
+      if (id === 'library') return true;
+      if (id === 'stone')   return state.hasClue;
+      return state.hasClue && state.hasLocation;
+    }
+
+    const MAZE_COLS = 12, MAZE_ROWS = 7, MAZE_WALL_T = 8;
+    let mazeGrid = null;
+
+    function generateMazeData() {
+      const visited = Array.from({ length: MAZE_ROWS }, () => Array(MAZE_COLS).fill(false));
+      const hWall = Array.from({ length: MAZE_ROWS + 1 }, () => Array(MAZE_COLS).fill(true));
+      const vWall = Array.from({ length: MAZE_ROWS }, () => Array(MAZE_COLS + 1).fill(true));
+      const stack = [{ r: 0, c: 0 }]; visited[0][0] = true;
+      const dirs = [{ dr: -1, dc: 0, type: 'top' }, { dr: 0, dc: 1, type: 'right' }, { dr: 1, dc: 0, type: 'bottom' }, { dr: 0, dc: -1, type: 'left' }];
+      while (stack.length) {
+        const cur = stack[stack.length - 1];
+        const neighbors = [];
+        for (const d of dirs) {
+          const nr = cur.r + d.dr, nc = cur.c + d.dc;
+          if (nr < 0 || nr >= MAZE_ROWS || nc < 0 || nc >= MAZE_COLS) continue;
+          if (visited[nr][nc]) continue;
+          neighbors.push({ ...d, r: nr, c: nc });
+        }
+        if (neighbors.length === 0) { stack.pop(); continue; }
+        const pick = neighbors[Math.floor(Math.random() * neighbors.length)];
+        if (pick.type === 'top') hWall[cur.r][cur.c] = false;
+        else if (pick.type === 'bottom') hWall[cur.r + 1][cur.c] = false;
+        else if (pick.type === 'left') vWall[cur.r][cur.c] = false;
+        else if (pick.type === 'right') vWall[cur.r][cur.c + 1] = false;
+        visited[pick.r][pick.c] = true; stack.push({ r: pick.r, c: pick.c });
+      }
+      return { hWall, vWall };
+    }
+    function renderMaze() {
+      mazeLayer.innerHTML = ''; state.activeWalls = [];
+      const cellW = WORLD_W / MAZE_COLS, cellH = WORLD_H / MAZE_ROWS;
+      const { hWall, vWall } = mazeGrid;
+      for (let r = 0; r <= MAZE_ROWS; r++) {
+        for (let c = 0; c < MAZE_COLS; c++) {
+          if (hWall[r][c]) renderWall({ x: c * cellW, y: r * cellH - MAZE_WALL_T / 2, w: cellW, h: MAZE_WALL_T });
+        }
+      }
+      for (let r = 0; r < MAZE_ROWS; r++) {
+        for (let c = 0; c <= MAZE_COLS; c++) {
+          if (vWall[r][c]) renderWall({ x: c * cellW - MAZE_WALL_T / 2, y: r * cellH, w: MAZE_WALL_T, h: cellH });
+        }
+      }
+    }
+    function renderWall(w) {
+      const el = document.createElement('div'); el.className = 'maze-wall';
+      el.style.left = w.x + 'px'; el.style.top = w.y + 'px';
+      el.style.width = w.w + 'px'; el.style.height = w.h + 'px';
+      mazeLayer.appendChild(el); state.activeWalls.push(w);
+    }
+    function collideWithWalls(nx, ny) {
+      const h = PLAYER_SIZE / 2 - 6;
+      const left = nx - h, right = nx + h, top = ny - h, bottom = ny + h;
+      for (const w of state.activeWalls) {
+        if (right > w.x && left < w.x + w.w && bottom > w.y && top < w.y + w.h) return true;
+      }
+      return false;
+    }
+    function findFreeCell(preferBottom = true) {
+      const cellW = WORLD_W / MAZE_COLS, cellH = WORLD_H / MAZE_ROWS;
+      const rows = [...Array(MAZE_ROWS).keys()]; if (preferBottom) rows.reverse();
+      for (const r of rows) {
+        for (let c = 0; c < MAZE_COLS; c++) {
+          const x = (c + 0.5) * cellW, y = (r + 0.5) * cellH;
+          if (!collideWithWalls(x, y)) return { x, y };
+        }
+      }
+      return { x: WORLD_W / 2, y: WORLD_H / 2 };
+    }
+
+    function spawnPickups(portal) {
+      pickupsLayer.innerHTML = ''; state.activePickups = [];
+      const allIcons = { clue: ['📜', '📖', '🗒️'], decode: ['🔤', '🔣', '🔠'], temple: ['📦', '🎁', '📮'], bonus: ['💎', '🪙', '💍'] };
+      const icons = allIcons[portal.kind] || allIcons.bonus;
+      
+      const realIndex = Math.floor(Math.random() * 3); 
+      const positions = [];
+      const cellW = WORLD_W / MAZE_COLS, cellH = WORLD_H / MAZE_ROWS;
+      let attempts = 0;
+      while (positions.length < 3 && attempts < 500) {
+        attempts++;
+        const r = Math.floor(Math.random() * MAZE_ROWS), c = Math.floor(Math.random() * MAZE_COLS);
+        const x = (c + 0.5) * cellW, y = (r + 0.5) * cellH;
+        if (collideWithWalls(x, y)) continue;
+        const spawn = findFreeCell(true);
+        if (Math.hypot(x - spawn.x, y - spawn.y) < 100) continue;
+        if (positions.some(p => Math.hypot(p.x - x, p.y - y) < 100)) continue;
+        positions.push({ x, y });
+      }
+      positions.forEach((pos, i) => {
+        const isReal = (i === realIndex);
+        const icon = isReal ? icons[0] : icons[1 + (i % 2)];
+        const el = document.createElement('div'); el.className = 'pickup';
+        el.style.left = (pos.x - 28) + 'px'; el.style.top = (pos.y - 28) + 'px';
+        el.innerHTML = `${icon}`; pickupsLayer.appendChild(el);
+        state.activePickups.push({ el, x: pos.x, y: pos.y, icon, real: isReal, picked: false });
+      });
+    }
+
+    function spawnGuards(count = 2) {
+      guardsLayer.innerHTML = ''; state.activeGuards = [];
+      for (let i = 0; i < count; i++) {
+        const el = document.createElement('div'); el.className = 'guard';
+        el.innerHTML = '👹<div class="guard-eye"></div>';
+        let x = 100, y = 100, attempts = 0;
+        while (attempts++ < 100) {
+          const cx = 100 + Math.random() * (WORLD_W - 200);
+          const cy = 100 + Math.random() * (WORLD_H - 200);
+          if (Math.hypot(cx - state.px, cy - state.py) > 150) { x = cx; y = cy; break; }
+        }
+        el.style.left = (x - 24) + 'px'; el.style.top = (y - 24) + 'px';
+        guardsLayer.appendChild(el);
+        state.activeGuards.push({ el, x, y, targetX: x, targetY: y, speed: 1.5, timer: 0 });
+      }
+    }
+
+    function updateGuards(dt) {
+      if (state.busy || state.switching || state.finished) return;
+      state.activeGuards.forEach(g => {
+        g.timer += dt;
+        if (g.timer > 800) { g.timer = 0; g.targetX = state.px; g.targetY = state.py; }
+        const dx = g.targetX - g.x, dy = g.targetY - g.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > 5) {
+          let moveX = (dx / dist) * g.speed, moveY = (dy / dist) * g.speed;
+          g.x += moveX; g.y += moveY;
+          g.el.style.left = (g.x - 24) + 'px'; g.el.style.top = (g.y - 24) + 'px';
+          const d = Math.hypot(state.px - g.x, state.py - g.y);
+          const eye = g.el.querySelector('.guard-eye');
+          if (eye) eye.style.opacity = d < 130 ? '1' : '.5';
+          if (d < 60 && !state.busy && !state.finished) caughtByGuard();
+        }
+      });
+    }
+
+    function clearSceneExtras() {
+      pickupsLayer.innerHTML = ''; guardsLayer.innerHTML = ''; mazeLayer.innerHTML = '';
+      state.activePickups = []; state.activeGuards = []; state.activeWalls = [];
+    }
+
+    async function enterScene(portal) {
+      if (state.switching) return;
+      state.switching = true; state.busy = true;
+      sceneFade.classList.add('active');
+      await sleep(400);
+
+      world.className = 'world scene-' + portal.scene;
+      sceneTitle.textContent = `${portal.icon} ${portal.name}`;
+      state.scene = portal.id;
+      clearSceneExtras();
+      portalsLayer.innerHTML = ''; state.activePortals = [];
+      mapBanner.classList.remove('show');
+
+      if (state.done[portal.id]) {
+        log(`<span class="em">📌</span> 你已经探索过 ${portal.name} 了。`);
+      } else {
+        // ⭐ 严格互斥：只有图书馆和石碑必带迷宫。其余 4 个遗迹：有守卫则无迷宫，无守卫则必有迷宫。
+        const hasGuard = state.guardSpots.includes(portal.id);
+        const needMaze = !hasGuard; // 只要没守卫，全都有迷宫！
+
+        if (hasGuard) {
+          spawnGuards(2);
+          showWarning('小心守卫！一旦被抓将被赶出此地！');
+          log(`<span class="em">⚠️</span> ${portal.name}有全图巡逻的守卫，且没有迷宫遮挡！`, 'error');
+          spawnPickups(portal); 
+        } else {
+          if (needMaze) { mazeGrid = generateMazeData(); renderMaze(); }
+          else mazeGrid = null;
+          spawnPickups(portal);
+        }
+      }
+
+      const spawn = findFreeCell(true);
+      state.px = spawn.x; state.py = spawn.y;
+
+      await sleep(120);
+      sceneFade.classList.remove('active');
+      state.switching = false; state.busy = false;
+
+      exitSceneBtn.classList.add('show');
+      updateExitBtnState();
+      updateObjectiveForScene(portal);
+    }
+
+    function updateExitBtnState() {
+      const hasPending = state.activePickups.some(p => !p.picked && p.real);
+      if (hasPending && !state.done[state.scene]) {
+        exitSceneBtn.classList.add('locked'); exitSceneBtn.textContent = '← 拾取完再离开';
+      } else {
+        exitSceneBtn.classList.remove('locked'); exitSceneBtn.textContent = '← 返回户外';
+      }
+    }
+
+    function updateObjectiveForScene(portal) {
+      if (state.done[portal.id]) { setObjective(`<b>${portal.name}</b> 已探索完`); return; }
+      if (portal.kind === 'clue') setObjective(`在 <b>📚 图书馆</b> 找到 <b>线索</b>`);
+      else if (portal.kind === 'decode') setObjective(`在 <b>🧩 石碑</b> 拾取 <b>解码符文</b>`);
+      else if (portal.id === state.treasureSpot) setObjective(`找到 <b>📦 宝箱</b>，小心守卫！`);
+      else setObjective(`在 <b>${portal.name}</b> 探索`);
+    }
+
+    async function exitToOutdoor(force = false) {
+      if (state.switching) return;
+      if (!force && !state.done[state.scene]) {
+        const hasPending = state.activePickups.some(p => !p.picked && p.real);
+        if (hasPending) { showBanner(`<strong>⛔ 先别走！</strong>还有东西没拿`, 2500); return; }
+      }
+      state.switching = true; state.busy = true;
+      sceneFade.classList.add('active'); await sleep(400);
+
+      world.className = 'world scene-outdoor'; sceneTitle.textContent = '🌍 户外地图';
+      state.scene = 'outdoor'; exitSceneBtn.classList.remove('show');
+      clearSceneExtras(); portalsLayer.innerHTML = ''; renderOutdoorPortals();
+      mapBanner.classList.remove('show');
+      state.px = WORLD_W / 2; state.py = WORLD_H / 2;
+
+      await sleep(120); sceneFade.classList.remove('active');
+      state.switching = false; state.busy = false;
+      refreshOutdoorObjective();
+    }
+
+    function refreshOutdoorObjective() {
+      if (state.finished) { setObjective('🏆 寻宝完成！可继续探索或按 R 重玩'); return; }
+      if (!state.hasClue) setObjective('去 <b>📚 图书馆</b> 找线索');
+      else if (!state.hasLocation) setObjective('去 <b>🧩 石碑</b> 解码古文字');
+      else if (!state.hasTreasureBox) {
+        if (!state.treasureHinted) {
+          state.treasureHinted = true;
+          log(`<span class="em">🗺️</span> 藏宝点已经浮现，去各个遗迹找找看吧……`, 'hint');
+        }
+        setObjective('去各个遗迹找找 <b>藏宝点</b>');
+      } else { setObjective('🏆 寻宝完成！可按 R 重玩'); }
+    }
+
+    function updateHintBubble() {
+      if (state.busy || state.switching) {
+        hintBubble.classList.remove('show');
+        return;
+      }
+      if (state.scene === 'outdoor') {
+        let near = null, minD = 90;
+        state.activePortals.forEach(p => {
+          const d = Math.hypot(state.px - p.x, state.py - p.y);
+          if (d < minD) { minD = d; near = p; }
+        });
+        state.activePortals.forEach(p => p.el.classList.toggle('near', p === near));
+        state.activePickups.forEach(p => p.el.classList.remove('near'));
+        if (near && !state.finished) {
+          hintBubble.style.left = near.x + 'px'; hintBubble.style.top = (near.y - 70) + 'px';
+          hintBubble.classList.add('show'); hintBubble.dataset.portalId = near.id; hintBubble.dataset.pickupIdx = -1;
+        } else { hintBubble.classList.remove('show'); hintBubble.dataset.portalId = ''; }
+        return;
+      }
+
+      let nearPickup = null, minPD = 70;
+      state.activePickups.forEach((p, i) => {
+        if (p.picked) return;
+        const d = Math.hypot(state.px - p.x, state.py - p.y);
+        if (d < minPD) { minPD = d; nearPickup = { p, i }; }
+      });
+      state.activePickups.forEach(p => p.el.classList.remove('near'));
+      state.activePortals.forEach(p => p.el.classList.remove('near'));
+      if (nearPickup && !state.finished) {
+        nearPickup.p.el.classList.add('near');
+        hintBubble.style.left = nearPickup.p.x + 'px'; hintBubble.style.top = (nearPickup.p.y - 60) + 'px';
+        hintBubble.classList.add('show'); hintBubble.dataset.pickupIdx = nearPickup.i; hintBubble.dataset.portalId = '';
+      } else { hintBubble.classList.remove('show'); hintBubble.dataset.pickupIdx = -1; }
+    }
+
+    let lastTime = performance.now();
+    function loop(time) {
+      const dt = time - lastTime; lastTime = time;
+
+      let dx = 0, dy = 0;
+      const isModalOpen = pickupPopup.classList.contains('show') || victoryModal.classList.contains('show');
+      if (!state.busy && !state.finished && !state.switching && !isModalOpen) {
+        if (state.keys['w'] || state.keys['arrowup'])    dy -= 1;
+        if (state.keys['s'] || state.keys['arrowdown'])  dy += 1;
+        if (state.keys['a'] || state.keys['arrowleft'])  dx -= 1;
+        if (state.keys['d'] || state.keys['arrowright']) dx += 1;
+      }
+
+      const moving = dx !== 0 || dy !== 0;
+      if (moving) {
+        const len = Math.hypot(dx, dy);
+        dx = dx / len * SPEED; dy = dy / len * SPEED;
+        if (dx < 0) state.facing = 'left';
+        else if (dx > 0) state.facing = 'right';
+        else if (dy < 0) state.facing = 'up';
+        else if (dy > 0) state.facing = 'down';
+        const nx = state.px + dx;
+        if (!collideWithWalls(nx, state.py)) state.px = Math.max(PLAYER_SIZE/2, Math.min(WORLD_W - PLAYER_SIZE/2, nx));
+        const ny = state.py + dy;
+        if (!collideWithWalls(state.px, ny)) state.py = Math.max(PLAYER_SIZE/2, Math.min(WORLD_H - PLAYER_SIZE/2, ny));
+      }
+
+      playerEl.style.left = (state.px - PLAYER_SIZE/2) + 'px';
+      playerEl.style.top  = (state.py - PLAYER_SIZE/2) + 'px';
+      animateWalk(moving);
+
+      if (state.activeGuards.length > 0) updateGuards(dt);
+      updateHintBubble();
+      requestAnimationFrame(loop);
+    }
+
+    async function caughtByGuard() {
+      if (state.busy) return;
+      state.busy = true;
+      showWarning('被守卫抓住了！你被赶出去了！');
+      await sleep(1200);
+      exitToOutdoor(true);
+      state.busy = false;
+    }
+
+    function tryInteract() {
+      if (state.busy || state.finished || state.switching) return;
+      if (state.scene === 'outdoor') {
+        const id = hintBubble.dataset.portalId;
+        if (id) {
+          const portal = state.activePortals.find(p => p.id === id);
+          if (!portal) return;
+          if (!isPortalUnlocked(portal.id)) {
+            if (portal.id === 'stone') showBanner(`<strong>⛔ 还不行</strong>：先去图书馆找到线索`, 3000);
+            else showBanner(`<strong>⛔ 还不行</strong>：先去石碑解码藏宝点`, 3000);
+            return;
+          }
+          enterScene(portal);
+        }
+        return;
+      }
+      const idx = parseInt(hintBubble.dataset.pickupIdx, 10);
+      if (idx >= 0 && state.activePickups[idx]) pickupItem(state.activePickups[idx]);
+    }
+
+    async function pickupItem(pickup) {
+      if (pickup.picked || state.busy) return;
+      state.busy = true; pickup.picked = true;
+      pickup.el.classList.add('picked'); burst(pickup.x, pickup.y, 22);
+      await sleep(400); pickup.el.remove();
+
+      if (!pickup.real) {
+        log(`<span class="em">📦</span> 空的……什么都没有。`);
+        showPickupPopup(pickup.icon, '<b>空的……</b><br>这里什么也没有，去别处看看吧。', () => { 
+          state.busy = false; updateExitBtnState(); 
+        });
+        return;
+      }
+
+      const scene = state.scene;
+      
+      if (scene === 'library') {
+        const clue = await TreasureMap.getInitialClue();
+        state.hasClue = true; state.progress = Math.max(state.progress, 1); updateProgressBar(); markDone('library');
+        log(`<span class="em">📜</span> 你找到了一张泛黄的纸条，上面写着：`);
+        log(`&nbsp;&nbsp;<b style="color:#b07515">“${clue}”</b>`);
+        log(`&nbsp;&nbsp;<span class="hint">💡 去 🧩 石碑看看能不能解码……</span>`);
+        showPickupPopup('📜', `<b>线索：</b><br><em>${clue}</em><br><br>下一步：去 🧩 石碑解码`, () => { 
+          state.busy = false; updateExitBtnState(); 
+        });
+      }
+      else if (scene === 'stone') {
+        const location = await TreasureMap.decodeAncientScript('clue');
+        state.hasLocation = true; state.progress = Math.max(state.progress, 2); updateProgressBar(); markDone('stone');
+        log(`<span class="em">🔤</span> 符文解码成功！`);
+        log(`&nbsp;&nbsp;<b style="color:#b07515">“${location}”</b>`);
+        log(`&nbsp;&nbsp;<span class="hint">💡 藏宝点已经浮现，具体在哪个遗迹还需要去探索……</span>`);
+        showPickupPopup('🔤', `<b>解码成功：</b><br><em>${location}</em><br><br>藏宝点已经浮现，去各个遗迹探索吧！`, () => { 
+          state.busy = false; updateExitBtnState(); 
+        });
+      }
+      else if (scene === state.treasureSpot && !state.hasTreasureBox) { // 只有真藏宝点并且没拿过
+        try {
+          const box = await TreasureMap.searchTemple('temple');
+          state.hasTreasureBox = true; state.progress = Math.max(state.progress, 3); updateProgressBar(); markDone(scene);
+          log(`<span class="em">📦</span> ${box}`);
+          log(`&nbsp;&nbsp;<span class="success">🏆 你找到了传说中的宝藏！</span>`);
+          showPickupPopup('📦', `<b>${box}</b><br><br>你找到了传说中的宝藏！`, () => { 
+            state.busy = false; updateExitBtnState(); 
+          });
+        } catch (err) {
+          log(`<span class="em error">⚔️</span> ${err}`, 'error');
+          log(`<span class="hint">💡 守卫走了，再试一次……</span>`);
+          showPickupPopup('⚔️', `<b>${err}</b><br><br>重新找机会吧`, () => { 
+            state.busy = false; updateExitBtnState(); 
+          });
+          await sleep(800); spawnPickups(PORTALS.find(x => x.id === scene));
+        }
+      }
+      else {
+        // 所有非藏宝点场景（含拿过宝箱的）走这里
+        let treasure = '';
+        if (scene === 'church') treasure = '⛪ 失落的圣典里夹着古代金币！';
+        else if (scene === 'cave') treasure = '🕳️ 洞穴深处有一箱钻石！';
+        else if (scene === 'basement') treasure = '📦 地下室角落找到金币与宝石！';
+        else treasure = '✨ 你找到了一些古代金币！';
+
+        await new Promise(r => setTimeout(r, 900));
+        state.progress = Math.min(state.progress + 1, 5); updateProgressBar(); markDone(scene);
+        log(`<span class="em">💎</span> ${treasure}`);
+        showPickupPopup(pickup.icon, `<b>奖励：</b>${treasure}`, () => { 
+          state.busy = false; updateExitBtnState(); 
+        });
+      }
+    }
+
+    function markDone(id) {
+      state.done[id] = true;
+      state.activePortals.forEach(p => {
+        if (state.done[p.id]) p.el.classList.add('done');
+        if (isPortalUnlocked(p.id)) p.el.classList.remove('locked');
+        else p.el.classList.add('locked');
+      });
+      checkVictory();
+    }
+
+    function showPickupPopup(icon, text, onClose) {
+      ppIcon.textContent = icon;
+      ppText.innerHTML = text;
+      pickupPopup.classList.add('show');
+      state.onPopupClose = onClose;
+    }
+    
+    ppClose.addEventListener('click', () => {
+      pickupPopup.classList.remove('show');
+      if (state.onPopupClose) {
+        const cb = state.onPopupClose;
+        state.onPopupClose = null;
+        cb();
+      }
+      state.busy = false;
+    });
+
+    function checkVictory() {
+      if (state.finished || state.trophyShown) return; // ⭐ 核心修复：奖杯只闪一次
+      
+      if (state.hasClue && state.hasLocation && state.hasTreasureBox) {
+        state.finished = true; 
+        state.trophyShown = true; // ⭐ 标记奖杯已出现过
+        updateProgressBar(); barEl.style.width = '100%'; percentEl.textContent = '100%';
+        
+        victoryFxLayer.innerHTML = ''; victoryFxLayer.classList.remove('hidden');
+        const trophy = document.createElement('div'); trophy.className = 'victory-trophy'; trophy.textContent = '🏆'; victoryFxLayer.appendChild(trophy);
+        for (let i = 0; i < 24; i++) {
+          const star = document.createElement('div'); star.className = 'trophy-star';
+          star.textContent = ['⭐','✨','🌟','💫'][Math.floor(Math.random()*4)];
+          star.style.left = (50 + (Math.random() * 60 - 30)) + '%'; star.style.top  = (50 + (Math.random() * 60 - 30)) + '%';
+          star.style.animationDelay = (Math.random() * 1.5) + 's'; star.style.animationDuration = (1.2 + Math.random() * 0.8) + 's';
+          victoryFxLayer.appendChild(star);
+        }
+        setTimeout(() => { 
+          victoryFxLayer.classList.add('hidden'); 
+          victoryModal.classList.add('show'); 
+        }, 5200);
+      }
+    }
+
+    window.addEventListener('keydown', (e) => {
+      const k = e.key.toLowerCase(); state.keys[k] = true;
+      if (k === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        if (pickupPopup.classList.contains('show')) ppClose.click(); 
+        else tryInteract();
+      }
+      if (k === 'escape' && state.scene !== 'outdoor') { 
+        e.preventDefault(); 
+        if(!state.busy && !pickupPopup.classList.contains('show') && !victoryModal.classList.contains('show')) exitToOutdoor(); 
+      }
+      if (k === 'r') resetGame();
+      if (['arrowup','arrowdown','arrowleft','arrowright'].includes(k)) e.preventDefault();
+    });
+    window.addEventListener('keyup', (e) => { state.keys[e.key.toLowerCase()] = false; });
+
+    function resetGame() {
+      syncWorldSize();
+      state.px = WORLD_W / 2; state.py = WORLD_H / 2;
+      state.facing = 'down'; state.frame = 0; state.frameTimer = 0;
+      state.busy = false; state.finished = false; state.progress = 0; state.done = {};
+      state.scene = 'outdoor'; state.switching = false; state.warningActive = false;
+      state.hasClue = false; state.hasLocation = false; state.hasTreasureBox = false;
+      state.treasureHinted = false;
+      state.trophyShown = false; // ⭐ 重置奖杯记录
+      
+      state.treasureSpot = EXPLORE_SPOTS[Math.floor(Math.random() * EXPLORE_SPOTS.length)];
+      const others = EXPLORE_SPOTS.filter(x => x !== state.treasureSpot).sort(() => Math.random() - 0.5);
+      state.guardSpots = [others[0], others[1]];
+
+      mazeGrid = null;
+      victoryModal.classList.remove('show'); pickupPopup.classList.remove('show');
+      mapBanner.classList.remove('show'); exitSceneBtn.classList.remove('show');
+      victoryFxLayer.innerHTML = ''; victoryFxLayer.classList.add('hidden');
+      world.className = 'world scene-outdoor'; sceneTitle.textContent = '🌍 户外地图';
+      clearSceneExtras(); renderOutdoorPortals(); clearLog(); updateProgressBar();
+      log('<span class="em">🔍</span> 冒险开始！先走到 <b>📚 图书馆</b> 按空格进入。');
+      setObjective('去 <b>📚 图书馆</b> 找线索');
+      hintBubble.classList.remove('show');
+      state.keys = {}; // 清空按键
+    }
+
+    exitSceneBtn.addEventListener('click', () => {
+      if (exitSceneBtn.classList.contains('locked')) { showBanner(`<strong>⛔ 先别走！</strong>把这里的有效物品拾取完`, 2500); return; }
+      exitToOutdoor();
+    });
+
+    btnAgain.addEventListener('click', () => { victoryModal.classList.remove('show'); resetGame(); });
+    
+    // ⭐ 修复卡死与状态锁
+    btnContinueMap.addEventListener('click', () => { 
+      victoryModal.classList.remove('show');
+      state.finished = false; // 解除通关移动锁定
+      state.busy = false;
+      state.switching = false;
+      state.warningActive = false;
+      state.keys = {}; 
+      document.body.focus(); 
+      if(document.activeElement) document.activeElement.blur();
+      
+      // 通关后提示语改变
+      setObjective('🏆 寻宝完成！可按 R 重玩或在各个遗迹探索');
+      log('<span class="hint">💡 你已获得宝藏，可以继续探索其他遗迹收集金币宝石。</span>');
+    });
+    
+    btnExit.addEventListener('click', () => {
+      victoryModal.classList.remove('show'); window.close();
+      setTimeout(() => { document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;font-size:1.5rem;color:#b07515">👋 感谢游玩！</div>'; }, 300);
+    });
+
+    function init() { syncWorldSize(); resetGame(); requestAnimationFrame(loop); }
+    window.addEventListener('DOMContentLoaded', init);
+  })();
+  </script>
+</body>
+</html>
